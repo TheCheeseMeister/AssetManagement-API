@@ -1,9 +1,12 @@
 package org.example.functions;
 
 import java.io.ByteArrayInputStream;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.sql.*;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microsoft.azure.functions.annotation.*;
 import com.microsoft.azure.functions.*;
@@ -34,7 +37,7 @@ public class HttpTriggerJava {
                 "Crew_Id", // smallint
                 "Last_Update_Date" // datetime2
         };
-        return queryTop10(request, context, "Maintenance Crew", columns);
+        return queryTop10(request, context, "SLD Maintenance Crew", columns);
     }
 
     @FunctionName("GetSRI")
@@ -54,7 +57,7 @@ public class HttpTriggerJava {
                 "Parent_End_Milepost", // float
                 "Last_Update_Date" // datetime2
         };
-        return queryTop10(request, context, "SRI Master", columns);
+        return queryTop10(request, context, "SLD SRI Master", columns);
     }
 
     /**
@@ -125,6 +128,136 @@ public class HttpTriggerJava {
                 .header("Content-Type", "application/json")
                 .body(results)
                 .build();
+    }
+
+    @FunctionName("UploadSignage")
+    public HttpResponseMessage uploadSignage(
+            @HttpTrigger(name = "req", methods = {HttpMethod.POST}, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context
+            ) {
+        context.getLogger().info("Processing Upload to Signage table...");
+
+        // Handle metadata
+        String json = request.getBody().orElse("");
+        if (json.isEmpty()) {
+            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                    .body("Request body is empty.")
+                    .build();
+        }
+
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode data = mapper.readTree(json);
+
+            // Fill out metadata variables - specific variables aren't allowed to be null
+            String street = data.get("street") != null ? data.get("street").asText() : null;
+            Double milepost = data.get("milepost").asDouble();
+            Double lat = data.get("lat") != null ? data.get("lat").asDouble() : null;
+            Double lon = data.get("long") != null ? data.get("long").asDouble() : null;
+            String location = data.get("location") != null ? data.get("location").asText() : null;
+            int posts = data.get("posts").asInt();
+            String type = data.get("type").asText();
+            double height = data.get("height").asDouble();
+            Boolean illuminated = data.get("illuminated") != null ? data.get("illuminated").asBoolean() : null;
+            Boolean walkway = data.get("walkway") != null ? data.get("walkway").asBoolean() : null;
+            String ground_treatment = data.get("ground_treatment").asText();
+
+            String dateStr = data.get("inventory_date").asText();
+            LocalDateTime inventoryDate = LocalDateTime.parse(dateStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+
+            String base64Image = data.get("image") != null ? data.get("image").asText() : null;
+
+            if (street == null || street.isEmpty() || lat == null || lon == null
+                    || location == null || location.isEmpty()
+                    || illuminated == null || walkway == null
+                    || base64Image == null || base64Image.isEmpty()) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Request is missing non-nullable fields.")
+                        .build();
+            }
+
+            context.getLogger().info("Metadata received. Uploading image and retrieving filename...");
+
+            // Upload image to blob and get path
+            byte[] imageBytes = Base64.getDecoder().decode(base64Image);
+
+            String connectStr = System.getenv("ConnectBlobStorage");
+            String containerName = "images";
+            BlobServiceClient blobServiceClient = new BlobServiceClientBuilder()
+                    .connectionString(connectStr)
+                    .buildClient();
+
+            BlobContainerClient containerClient = blobServiceClient.getBlobContainerClient(containerName);
+            if (!containerClient.exists()) {
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Container 'images' doesn't exist.")
+                        .build();
+            }
+
+            // Name Blob (also what will fill image field in database)
+            String blobName = String.format("%f_%f.png", lat, lon);
+            BlobClient blobClient = containerClient.getBlobClient(blobName);
+
+            // Upload image
+            ByteArrayInputStream dataStream = new ByteArrayInputStream(imageBytes);
+            blobClient.upload(dataStream, imageBytes.length, true);
+
+            // Set metadata for Blob (currently don't need, but will leave here for now)
+            //if (!metadataMap.isEmpty()) {
+            //    blobClient.setMetadata(metadataMap);
+            //}
+
+            // Place into database
+            String connectionString = System.getenv("SqlConnectionString");
+
+            if (connectionString == null || connectionString.isEmpty()) {
+                context.getLogger().severe("SqlConnectionString is null or empty!");
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Database connection string is missing!")
+                        .build();
+            }
+
+            Connection conn = DriverManager.getConnection(connectionString);
+            String sql = "INSERT INTO dbo.[Signage] (Street, Milepost, Latitude, Longitude, Location, Posts, Type, Height, Illuminated, Walkway, Ground_Treatment, Inventory_Date, Image) " +
+                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+            PreparedStatement stmt = conn.prepareStatement(sql);
+            stmt.setString(1, street);
+            if (milepost != null) {
+                stmt.setDouble(2, milepost);
+            } else {
+                stmt.setNull(2, Types.BIT);
+            }
+            stmt.setDouble(3, lat);
+            stmt.setDouble(4, lon);
+            stmt.setString(5, location);
+            stmt.setInt(6, posts);
+            stmt.setString(7, type);
+            stmt.setDouble(8, height);
+            stmt.setBoolean(9, illuminated);
+            stmt.setBoolean(10, walkway);
+            stmt.setString(11, ground_treatment);
+            stmt.setTimestamp(12, Timestamp.valueOf(inventoryDate));
+            stmt.setString(13, blobName);
+
+            int rowsInserted = stmt.executeUpdate();
+            if (rowsInserted > 0) {
+                // Return success
+                return request.createResponseBuilder(HttpStatus.OK)
+                        .body("Signage uploaded successfully")
+                        .build();
+            } else {
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Failed to update database.")
+                        .build();
+            }
+        } catch (Exception e) {
+            context.getLogger().severe("Error processing request: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error processing request: " + e.getMessage())
+                    .build();
+        }
     }
 
     @FunctionName("UploadImage")
