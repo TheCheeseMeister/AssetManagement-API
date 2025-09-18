@@ -8,6 +8,7 @@ import java.sql.*;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.microsoft.azure.functions.annotation.*;
 import com.microsoft.azure.functions.*;
 
@@ -130,6 +131,13 @@ public class HttpTriggerJava {
                 .build();
     }
 
+    /**
+     * Takes in a post request and uses the fields of the request to create a new record in the Signage table.
+     *
+     * @param request A group of all the fields that will be imported into the Signage table.
+     * @param context General context
+     * @return Response request stating a successful upload to the Signage table.
+     */
     @FunctionName("UploadSignage")
     public HttpResponseMessage uploadSignage(
             @HttpTrigger(name = "req", methods = {HttpMethod.POST}, authLevel = AuthorizationLevel.FUNCTION)
@@ -152,19 +160,19 @@ public class HttpTriggerJava {
 
             // Fill out metadata variables - specific variables aren't allowed to be null
             String street = data.get("street") != null ? data.get("street").asText() : null;
-            Double milepost = data.get("milepost").asDouble();
+            Double milepost = data.hasNonNull("milepost") ? data.get("milepost").asDouble() : null;
             Double lat = data.get("lat") != null ? data.get("lat").asDouble() : null;
             Double lon = data.get("long") != null ? data.get("long").asDouble() : null;
             String location = data.get("location") != null ? data.get("location").asText() : null;
-            int posts = data.get("posts").asInt();
-            String type = data.get("type").asText();
-            double height = data.get("height").asDouble();
+            Integer posts = data.hasNonNull("posts") ? data.get("posts").asInt() : null;
+            String type = data.hasNonNull("type") ? data.get("type").asText() : null;
+            Double height = data.hasNonNull("height") ? data.get("height").asDouble() : null;
             Boolean illuminated = data.get("illuminated") != null ? data.get("illuminated").asBoolean() : null;
             Boolean walkway = data.get("walkway") != null ? data.get("walkway").asBoolean() : null;
-            String ground_treatment = data.get("ground_treatment").asText();
+            String ground_treatment = data.hasNonNull("ground_treatment") ? data.get("ground_treatment").asText() : null;
 
             String dateStr = data.get("inventory_date").asText();
-            LocalDateTime inventoryDate = LocalDateTime.parse(dateStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            LocalDateTime inventoryDate = !dateStr.isEmpty() ? LocalDateTime.parse(dateStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) : null;
 
             String base64Image = data.get("image") != null ? data.get("image").asText() : null;
 
@@ -227,17 +235,33 @@ public class HttpTriggerJava {
             if (milepost != null) {
                 stmt.setDouble(2, milepost);
             } else {
-                stmt.setNull(2, Types.BIT);
+                stmt.setNull(2, Types.DOUBLE);
             }
             stmt.setDouble(3, lat);
             stmt.setDouble(4, lon);
             stmt.setString(5, location);
-            stmt.setInt(6, posts);
-            stmt.setString(7, type);
-            stmt.setDouble(8, height);
+            if (posts != null) {
+                stmt.setInt(6, posts);
+            } else {
+                stmt.setNull(6, Types.INTEGER);
+            }
+            if (type != null) {
+                stmt.setString(7, type);
+            } else {
+                stmt.setNull(7, Types.NVARCHAR);
+            }
+            if (height != null) {
+                stmt.setDouble(8, height);
+            } else {
+                stmt.setNull(8, Types.DOUBLE);
+            }
             stmt.setBoolean(9, illuminated);
             stmt.setBoolean(10, walkway);
-            stmt.setString(11, ground_treatment);
+            if (ground_treatment != null) {
+                stmt.setString(11, ground_treatment);
+            } else {
+                stmt.setNull(11, Types.NVARCHAR);
+            }
             stmt.setTimestamp(12, Timestamp.valueOf(inventoryDate));
             stmt.setString(13, blobName);
 
