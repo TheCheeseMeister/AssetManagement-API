@@ -1,7 +1,9 @@
 package org.example.functions;
 
 import java.io.ByteArrayInputStream;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.sql.*;
@@ -170,16 +172,35 @@ public class HttpTriggerJava {
             Boolean illuminated = data.get("illuminated") != null ? data.get("illuminated").asBoolean() : null;
             Boolean walkway = data.get("walkway") != null ? data.get("walkway").asBoolean() : null;
             String ground_treatment = data.hasNonNull("ground_treatment") ? data.get("ground_treatment").asText() : null;
+            String condition = data.hasNonNull("condition") ? data.get("condition").asText() : null;
+            String defect = data.hasNonNull("defect") ? data.get("defect").asText() : null;
+            String weather_condition = data.hasNonNull("weather_condition") ? data.get("weather_condition").asText() : null;
+            Integer vehicle_speed = data.hasNonNull("vehicle_speed") ? data.get("vehicle_speed").asInt() : null;
+            String road_type = data.hasNonNull("road_type") ? data.get("road_type").asText() : null;
+            String image_type = data.hasNonNull("image_type") ? data.get("image_type").asText() : null;
+            String created_by = data.hasNonNull("created_by") ? data.get("created_by").asText() : null;
 
+            // Inventory_date split up into date and time
             String dateStr = data.get("inventory_date").asText();
-            LocalDateTime inventoryDate = !dateStr.isEmpty() ? LocalDateTime.parse(dateStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) : null;
+            LocalDate inventoryDate;
+            LocalTime inventoryTime;
+
+            if (!dateStr.isEmpty()) {
+                LocalDateTime dateParse = LocalDateTime.parse(dateStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+
+                inventoryDate = dateParse.toLocalDate();
+                inventoryTime = dateParse.toLocalTime();
+            } else {
+                inventoryDate = null;
+                inventoryTime = null;
+            }
 
             String base64Image = data.get("image") != null ? data.get("image").asText() : null;
 
             if (street == null || street.isEmpty() || lat == null || lon == null
                     || location == null || location.isEmpty()
                     || illuminated == null || walkway == null
-                    || base64Image == null || base64Image.isEmpty()) {
+                    || base64Image == null || base64Image.isEmpty() || inventoryDate == null || inventoryTime == null) {
                 return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
                         .body("Request is missing non-nullable fields.")
                         .build();
@@ -227,8 +248,10 @@ public class HttpTriggerJava {
             }
 
             Connection conn = DriverManager.getConnection(connectionString);
-            String sql = "INSERT INTO dbo.[Signage] (Street, Milepost, Latitude, Longitude, Location, Posts, Type, Height, Illuminated, Walkway, Ground_Treatment, Inventory_Date, Image) " +
-                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            String sql = "INSERT INTO dbo.[Signage] (Street, Milepost, Latitude, Longitude, Location, Posts, Type, Height, " +
+                         "Illuminated, Walkway, Ground_Treatment, Inventory_Date, Image, " +
+                         "Inventory_Time, Condition, Defect, Weather_Condition, Vehicle_Speed, Road_Type, Image_Type, Created_By) " +
+                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
             PreparedStatement stmt = conn.prepareStatement(sql);
             stmt.setString(1, street);
@@ -262,8 +285,46 @@ public class HttpTriggerJava {
             } else {
                 stmt.setNull(11, Types.NVARCHAR);
             }
-            stmt.setTimestamp(12, Timestamp.valueOf(inventoryDate));
+            stmt.setDate(12, java.sql.Date.valueOf(inventoryDate));
             stmt.setString(13, blobName);
+
+            // new fields
+            stmt.setTime(14, java.sql.Time.valueOf(inventoryTime));
+            if (condition != null) {
+                stmt.setString(15, condition);
+            } else {
+                stmt.setNull(15, Types.NVARCHAR);
+            }
+            if (defect != null) {
+                stmt.setString(16, defect);
+            } else {
+                stmt.setNull(16, Types.NVARCHAR);
+            }
+            if (weather_condition != null) {
+                stmt.setString(17, weather_condition);
+            } else {
+                stmt.setNull(17, Types.NVARCHAR);
+            }
+            if (vehicle_speed != null) {
+                stmt.setInt(18, vehicle_speed);
+            } else {
+                stmt.setNull(18, Types.INTEGER);
+            }
+            if (road_type != null) {
+                stmt.setString(19, road_type);
+            } else {
+                stmt.setNull(19, Types.NVARCHAR);
+            }
+            if (image_type != null) {
+                stmt.setString(20, image_type);
+            } else {
+                stmt.setNull(20, Types.NVARCHAR);
+            }
+            if (created_by != null) {
+                stmt.setString(21, created_by);
+            } else {
+                stmt.setNull(21, Types.NVARCHAR);
+            }
 
             int rowsInserted = stmt.executeUpdate();
             if (rowsInserted > 0) {
