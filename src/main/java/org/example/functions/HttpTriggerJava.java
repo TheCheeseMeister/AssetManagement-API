@@ -577,4 +577,93 @@ public class HttpTriggerJava {
                     .build();
         }
     }
+
+    @FunctionName("login")
+    public HttpResponseMessage login(
+            @HttpTrigger(name = "req", methods = { HttpMethod.POST }, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context) {
+
+        context.getLogger().info("Processing user login...");
+
+        try {
+            // ---- Parse body ----
+            String body = request.getBody().orElse("");
+            if (body.isEmpty()) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Request body is empty.")
+                        .build();
+            }
+
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode json = mapper.readTree(body);
+
+            String email    = json.hasNonNull("email")    ? json.get("email").asText().trim() : null;
+            String password = json.hasNonNull("password") ? json.get("password").asText()     : null;
+
+            if (email == null || email.isEmpty() || password == null || password.isEmpty()) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Missing required fields: email, password.")
+                        .build();
+            }
+
+            // ---- DB connection ----
+            String connStr = System.getenv("SqlConnectionString");
+            if (connStr == null || connStr.isEmpty()) {
+                context.getLogger().severe("SqlConnectionString is not configured.");
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Server misconfiguration: missing database connection string.")
+                        .build();
+            }
+
+            String sql = "SELECT ID, username, password, phonenumber FROM dbo.[Users] WHERE email = ?";
+            try (Connection conn = DriverManager.getConnection(connStr);
+                 PreparedStatement ps = conn.prepareStatement(sql)) {
+
+                ps.setString(1, email);
+
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        return request.createResponseBuilder(HttpStatus.UNAUTHORIZED)
+                                .body("Invalid email or password.")
+                                .build();
+                    }
+
+                    int id              = rs.getInt("ID");
+                    String username     = rs.getString("username");
+                    String storedPass   = rs.getString("password");
+                    String phoneNumber  = rs.getString("phonenumber");
+
+                    if (!password.equals(storedPass)) {
+                        return request.createResponseBuilder(HttpStatus.UNAUTHORIZED)
+                                .body("Invalid email or password.")
+                                .build();
+                    }
+
+                    // Success
+                    Map<String, Object> resp = new HashMap<>();
+                    resp.put("message", "Login successful");
+                    resp.put("id", id);
+                    resp.put("username", username);
+                    resp.put("email", email);
+                    if (phoneNumber != null) resp.put("phonenumber", phoneNumber);
+
+                    return request.createResponseBuilder(HttpStatus.OK)
+                            .header("Content-Type", "application/json")
+                            .body(mapper.writeValueAsString(resp))
+                            .build();
+                }
+            } catch (SQLException se) {
+                context.getLogger().severe("Database error: " + se.getMessage());
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Database error: " + se.getMessage())
+                        .build();
+            }
+        } catch (Exception e) {
+            context.getLogger().severe("Unhandled error: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error processing request: " + e.getMessage())
+                    .build();
+        }
+    }
 }
