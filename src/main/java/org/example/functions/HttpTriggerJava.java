@@ -345,6 +345,70 @@ public class HttpTriggerJava {
         }
     }
 
+    @FunctionName("GetDataForImageSignage")
+    public HttpResponseMessage getDataForImageSignage(
+            @HttpTrigger(name = "req", methods = {HttpMethod.POST}, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context
+            ) {
+        context.getLogger().info("Getting image filename...");
+
+        try {
+            String body = request.getBody().orElse(null);
+            if (body == null || body.isEmpty()) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Empty request body.")
+                        .build();
+            }
+
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode data = mapper.readTree(body);
+
+            String image = data.get("image").asText();
+
+            String[] columns = {"ID", "Street", "Milepost", "Latitude", "Longitude", "Location", "Posts",
+                                "Type", "Height", "Illuminated", "Walkway", "Ground_Treatment", "Inventory_Date",
+                                "Inventory_Time", "Condition", "Defect", "Weather_Condition", "Vehicle_Speed",
+                                "Road_Type", "Image_Type", "Created_By"};
+
+            String connectionString = System.getenv("SqlConnectionString");
+            String query = "SELECT " + String.join(", ", columns) + " FROM [dbo].[Signage] WHERE Image = ?";
+
+            List<Map<String, Object>> results = new ArrayList<>();
+
+            // Query Data based on image
+            try(Connection conn = DriverManager.getConnection(connectionString)) {
+                PreparedStatement stmt = conn.prepareStatement(query);
+                stmt.setString(1, image);
+                ResultSet rs = stmt.executeQuery();
+
+                while (rs.next()) {
+                    Map<String, Object> row = new HashMap<>();
+                    for (String col : columns) {
+                        row.put(col, rs.getObject(col));
+                    }
+                    results.add(row);
+                }
+            } catch (SQLException e) {
+                context.getLogger().severe("DB Error: " + e.getMessage());
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Database error: " + e.getMessage())
+                        .build();
+            }
+
+            // Return TOP 10 stored in results
+            return request.createResponseBuilder(HttpStatus.OK)
+                    .header("Content-Type", "application/json")
+                    .body(results)
+                    .build();
+        } catch (Exception e) {
+            context.getLogger().severe("Error: " + e.getMessage());
+
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error: " + e.getMessage()).build();
+        }
+    }
+
     @FunctionName("UploadImage")
     public HttpResponseMessage uploadImage(
             @HttpTrigger(name = "req", methods = {HttpMethod.POST}, authLevel = AuthorizationLevel.FUNCTION)
