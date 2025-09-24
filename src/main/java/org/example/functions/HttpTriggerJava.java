@@ -489,8 +489,8 @@ public class HttpTriggerJava {
         }
     }
 
-    @FunctionName("signup")
-    public HttpResponseMessage signIn(
+    @FunctionName("signUp")
+    public HttpResponseMessage signUp(
             @HttpTrigger(name = "req", methods = { HttpMethod.POST }, authLevel = AuthorizationLevel.FUNCTION)
             HttpRequestMessage<Optional<String>> request,
             final ExecutionContext context) {
@@ -578,7 +578,7 @@ public class HttpTriggerJava {
         }
     }
 
-    @FunctionName("login")
+    @FunctionName("Login")
     public HttpResponseMessage login(
             @HttpTrigger(name = "req", methods = { HttpMethod.POST }, authLevel = AuthorizationLevel.FUNCTION)
             HttpRequestMessage<Optional<String>> request,
