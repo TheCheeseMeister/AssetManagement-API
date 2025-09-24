@@ -488,4 +488,93 @@ public class HttpTriggerJava {
                     .body("Error: " + e.getMessage()).build();
         }
     }
+
+    @FunctionName("signup")
+    public HttpResponseMessage signIn(
+            @HttpTrigger(name = "req", methods = { HttpMethod.POST }, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context) {
+
+        context.getLogger().info("Processing user signup...");
+
+        try {
+            String body = request.getBody().orElse("");
+            if (body.isEmpty()) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Request body is empty.")
+                        .build();
+            }
+
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode json = mapper.readTree(body);
+
+            String username    = json.hasNonNull("username") ? json.get("username").asText().trim() : null;
+            String email       = json.hasNonNull("email")    ? json.get("email").asText().trim()    : null;
+            String password    = json.hasNonNull("password") ? json.get("password").asText()        : null;
+            String phoneNumber = json.hasNonNull("phonenumber") ? json.get("phonenumber").asText()   : null;
+
+            if (username == null || username.isEmpty()
+                    || email == null || email.isEmpty()
+                    || password == null || password.isEmpty()) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Missing required fields: username, email, password.")
+                        .build();
+            }
+
+            // ----- DB connection -----
+            String connStr = System.getenv("SqlConnectionString");
+            if (connStr == null || connStr.isEmpty()) {
+                context.getLogger().severe("SqlConnectionString is not configured.");
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Server misconfiguration: missing database connection string.")
+                        .build();
+            }
+
+            try (Connection conn = DriverManager.getConnection(connStr)) {
+                String sql = "INSERT INTO dbo.[Users] (username, password, email, phonenumber) VALUES (?, ?, ?, ?)";
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setString(1, username);
+                    ps.setString(2, password);      
+                    ps.setString(3, email);
+                    if (phoneNumber != null && !phoneNumber.isEmpty()) {
+                        ps.setString(4, phoneNumber);
+                    } else {
+                        ps.setNull(4, Types.NVARCHAR);
+                    }
+
+                    int rows = ps.executeUpdate();
+                    if (rows == 1) {
+                        Map<String, Object> resp = new HashMap<>();
+                        resp.put("message", "Signup successful");
+                        resp.put("email", email);
+                        return request.createResponseBuilder(HttpStatus.CREATED)
+                                .header("Content-Type", "application/json")
+                                .body(mapper.writeValueAsString(resp))
+                                .build();
+                    } else {
+                        return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                                .body("Unexpected result while creating user.")
+                                .build();
+                    }
+                }
+            } catch (SQLException se) {
+                // SQL Server unique/duplicate key: 2627 or 2601
+                int code = se.getErrorCode();
+                context.getLogger().warning("SQL error " + code + ": " + se.getMessage());
+                if (code == 2627 || code == 2601) {
+                    return request.createResponseBuilder(HttpStatus.CONFLICT)
+                            .body("Email already registered.")
+                            .build();
+                }
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Database error: " + se.getMessage())
+                        .build();
+            }
+        } catch (Exception e) {
+            context.getLogger().severe("Unhandled error: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error processing request: " + e.getMessage())
+                    .build();
+        }
+    }
 }
