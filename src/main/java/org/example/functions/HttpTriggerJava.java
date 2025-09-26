@@ -17,6 +17,9 @@ import com.microsoft.azure.functions.*;
 import com.azure.storage.blob.*;
 import com.azure.storage.blob.models.*;
 
+import org.example.functions.KeyVaultHelper;
+import org.example.functions.JwtGenerator;
+
 /**
  * Azure Functions with HTTP Trigger.
  */
@@ -31,6 +34,29 @@ public class HttpTriggerJava {
             @HttpTrigger(name = "req", methods = {HttpMethod.GET}, authLevel = AuthorizationLevel.FUNCTION)
             HttpRequestMessage<Optional<String>> request,
             final ExecutionContext context) {
+
+        // Ensure Bearer token is present
+        String authHeader = request.getHeaders().get("authorization");
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return request.createResponseBuilder(HttpStatus.UNAUTHORIZED)
+                    .body("Missing or invalid Authorization header")
+                    .build();
+        }
+
+        String token = authHeader.substring(7);
+        String singingKey = KeyVaultHelper.getSigningKey();
+
+        try {
+            JwtGenerator.validateToken(token, singingKey);
+        } catch (Exception e) {
+            context.getLogger().warning("Invalid JWT: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.UNAUTHORIZED)
+                    .body("Invalid or expired token")
+                    .build();
+        }
+
+        // Authenticated
+
         String[] columns = {
                 "ID", // PK, int
                 "SRI", // nvarchar
@@ -531,7 +557,7 @@ public class HttpTriggerJava {
             }
 
             try (Connection conn = DriverManager.getConnection(connStr)) {
-                String sql = "INSERT INTO dbo.[Users] (username, password, email, phonenumber) VALUES (?, ?, ?, ?)";
+                String sql = "INSERT INTO dbo.[Users] (username, password, email, phonenumber) OUTPUT INSERTED.ID VALUES (?, ?, ?, ?)";
                 try (PreparedStatement ps = conn.prepareStatement(sql)) {
                     ps.setString(1, username);
                     ps.setString(2, password);      
@@ -542,11 +568,20 @@ public class HttpTriggerJava {
                         ps.setNull(4, Types.NVARCHAR);
                     }
 
-                    int rows = ps.executeUpdate();
-                    if (rows == 1) {
+                    ResultSet rs = ps.executeQuery();
+                    if (rs.next()) {
+                        int newID = rs.getInt(1);
+
+                        String signingKey = KeyVaultHelper.getSigningKey();
+                        String accessToken = JwtGenerator.generateAccessToken(newID, signingKey);
+                        String refreshToken = JwtGenerator.generateRefreshToken(newID, signingKey);
+
                         Map<String, Object> resp = new HashMap<>();
                         resp.put("message", "Signup successful");
                         resp.put("email", email);
+                        resp.put("accessToken", accessToken);
+                        resp.put("refreshToken", refreshToken);
+
                         return request.createResponseBuilder(HttpStatus.CREATED)
                                 .header("Content-Type", "application/json")
                                 .body(mapper.writeValueAsString(resp))
@@ -640,6 +675,22 @@ public class HttpTriggerJava {
                                 .build();
                     }
 
+                    String signingKey;
+                    String accessToken;
+                    String refreshToken;
+                    try {
+                        context.getLogger().info("Getting signing key...");
+                        signingKey = KeyVaultHelper.getSigningKey();
+                        context.getLogger().info("Succesfully got key.");
+                        accessToken = JwtGenerator.generateAccessToken(id, signingKey);
+                        refreshToken = JwtGenerator.generateRefreshToken(id, signingKey);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                                .body("Error: " + e.getMessage())
+                                .build();
+                    }
+
                     // Success
                     Map<String, Object> resp = new HashMap<>();
                     resp.put("message", "Login successful");
@@ -647,6 +698,8 @@ public class HttpTriggerJava {
                     resp.put("username", username);
                     resp.put("email", email);
                     if (phoneNumber != null) resp.put("phonenumber", phoneNumber);
+                    resp.put("accessToken", accessToken);
+                    resp.put("refreshToken", refreshToken);
 
                     return request.createResponseBuilder(HttpStatus.OK)
                             .header("Content-Type", "application/json")
