@@ -7,9 +7,11 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.sql.*;
+import java.util.concurrent.ExecutionException;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.microsoft.azure.functions.annotation.*;
 import com.microsoft.azure.functions.*;
@@ -160,6 +162,87 @@ public class HttpTriggerJava {
     }
 
     /**
+     * Takes in a post request and uses an array to upload new images to the Signage Image Container.
+     *
+     * @param request An array of images encoded in base64
+     * @param context General context
+     * @return Response request stating a successful upload to the Signage Image container.
+     */
+    @FunctionName("BulkSignageImages")
+    public HttpResponseMessage bulkSignageImages(
+            @HttpTrigger(name = "req", methods = {HttpMethod.POST}, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context
+            ) {
+        context.getLogger().info("Processing Bulk Upload to Signage Image container...");
+
+        // Handle metadata
+        String json = request.getBody().orElse("");
+        if (json.isEmpty()) {
+            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                    .body("Request body is empty.")
+                    .build();
+        }
+
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode data = mapper.readTree(json);
+
+            if (!data.has("images") || !data.get("images").isArray()) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Missing or invalid 'images' array in request.")
+                        .build();
+            }
+
+            ArrayNode arr = (ArrayNode) data.get("images");
+            context.getLogger().info("Uploading images to container...");
+
+            String connectStr = System.getenv("ConnectBlobStorage");
+            String containerName = "images";
+            BlobServiceClient blobServiceClient = new BlobServiceClientBuilder()
+                    .connectionString(connectStr)
+                    .buildClient();
+
+            BlobContainerClient containerClient = blobServiceClient.getBlobContainerClient(containerName);
+            if (!containerClient.exists()) {
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Container 'images' doesn't exist.")
+                        .build();
+            }
+
+            int index = 1;
+            for (JsonNode imageNode : arr) {
+                String base64Image = imageNode.hasNonNull("image") ? imageNode.get("image").asText() : null;
+
+                byte[] imageBytes = Base64.getDecoder().decode(base64Image);
+
+                // Name Blob (also what will fill image field in database)
+                LocalDateTime timestamp = LocalDateTime.now();
+                String date = timestamp.format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+                String time = timestamp.format(DateTimeFormatter.ofPattern("HHmmss"));
+                String blobName = String.format("%s_%s_%d.png", date, time, index);
+
+                BlobClient blobClient = containerClient.getBlobClient(blobName);
+
+                // Upload image
+                ByteArrayInputStream dataStream = new ByteArrayInputStream(imageBytes);
+                blobClient.upload(dataStream, imageBytes.length, true);
+
+                index++;
+            }
+
+            return request.createResponseBuilder(HttpStatus.OK)
+                    .body("Successfully processed images.")
+                    .build();
+        } catch (Exception e) {
+            context.getLogger().severe("Error processing request: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error processing request: " + e.getMessage())
+                    .build();
+        }
+    }
+
+    /**
      * Takes in a post request and uses the fields of the request to create a new record in the Signage table.
      *
      * @param request A group of all the fields that will be imported into the Signage table.
@@ -189,8 +272,10 @@ public class HttpTriggerJava {
             // Fill out metadata variables - specific variables aren't allowed to be null
             String street = data.get("street") != null ? data.get("street").asText() : null;
             Double milepost = data.hasNonNull("milepost") ? data.get("milepost").asDouble() : null;
-            Double lat = data.get("lat") != null ? data.get("lat").asDouble() : null;
-            Double lon = data.get("long") != null ? data.get("long").asDouble() : null;
+            //Double lat = data.get("lat") != null ? data.get("lat").asDouble() : null;
+            //Double lon = data.get("long") != null ? data.get("long").asDouble() : null;
+            Double lat = data.hasNonNull("lat") ? data.get("lat").asDouble() : null;
+            Double lon = data.hasNonNull("long") ? data.get("long").asDouble() : null;
             String location = data.get("location") != null ? data.get("location").asText() : null;
             Integer posts = data.hasNonNull("posts") ? data.get("posts").asInt() : null;
             String type = data.hasNonNull("type") ? data.get("type").asText() : null;
@@ -223,7 +308,7 @@ public class HttpTriggerJava {
 
             String base64Image = data.get("image") != null ? data.get("image").asText() : null;
 
-            if (street == null || street.isEmpty() || lat == null || lon == null
+            if (street == null || street.isEmpty()
                     || location == null || location.isEmpty()
                     || illuminated == null || walkway == null
                     || base64Image == null || base64Image.isEmpty() || inventoryDate == null || inventoryTime == null) {
@@ -251,7 +336,18 @@ public class HttpTriggerJava {
             }
 
             // Name Blob (also what will fill image field in database)
-            String blobName = String.format("%f_%f.png", lat, lon);
+            String blobName = "";
+            if (lat == null || lon == null) {
+                blobName = String.format(
+                        "%s_%s_%s.png",
+                        street,
+                        inventoryDate.format(DateTimeFormatter.ofPattern("yyyyMMdd")),
+                        inventoryTime.format(DateTimeFormatter.ofPattern("HHmmss"))
+                );
+            } else {
+                blobName = String.format("%f_%f.png", lat, lon);
+            }
+
             BlobClient blobClient = containerClient.getBlobClient(blobName);
 
             // Upload image
@@ -286,8 +382,16 @@ public class HttpTriggerJava {
             } else {
                 stmt.setNull(2, Types.DOUBLE);
             }
-            stmt.setDouble(3, lat);
-            stmt.setDouble(4, lon);
+            if (lat != null) {
+                stmt.setDouble(3, lat);
+            } else {
+                stmt.setNull(3, Types.DOUBLE);
+            }
+            if (lon != null) {
+                stmt.setDouble(4, lon);
+            } else {
+                stmt.setNull(4, Types.DOUBLE);
+            }
             stmt.setString(5, location);
             if (posts != null) {
                 stmt.setInt(6, posts);
