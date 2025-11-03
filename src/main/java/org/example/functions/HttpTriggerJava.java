@@ -19,6 +19,7 @@ import com.microsoft.azure.functions.*;
 import com.azure.storage.blob.*;
 import com.azure.storage.blob.models.*;
 
+import com.nimbusds.jose.shaded.gson.Gson;
 import org.example.functions.KeyVaultHelper;
 import org.example.functions.JwtGenerator;
 
@@ -158,6 +159,143 @@ public class HttpTriggerJava {
         return request.createResponseBuilder(HttpStatus.OK)
                 .header("Content-Type", "application/json")
                 .body(results)
+                .build();
+    }
+
+    /**
+     * Returns all sign types currently stored in database.
+     *
+     * @param request Generic
+     * @param context General context
+     * @return List of sign types as Strings.
+     */
+    @FunctionName("GetAllSignTypes")
+    public HttpResponseMessage getAllSignTypes(
+            @HttpTrigger(name = "req", methods = {HttpMethod.GET}, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context
+            ) {
+        context.getLogger().info("Querying database...");
+
+        String connectionString = System.getenv("SqlConnectionString");
+        String query = "SELECT DISTINCT CAST(Type AS nvarchar(max)) AS Type\n" +
+                "FROM dbo.[Signage]\n" +
+                "ORDER BY CAST(Type AS nvarchar(max));";
+
+        context.getLogger().info("Starting SQL Connection Attempt...");
+
+        // Ensure Connection String is correctly being received from environment variables
+        if (connectionString == null || connectionString.isEmpty()) {
+            context.getLogger().severe("SqlConnectionString is null or empty!");
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Database connection string is missing!")
+                    .build();
+        }
+
+        // Ensure SQL JDBC Driver is loaded before continuing
+        try {
+            Class.forName("com.microsoft.sqlserver.jdbc.SQLServerDriver");
+            context.getLogger().info("SQL Server JDBC Driver loaded.");
+        } catch (ClassNotFoundException e) {
+            context.getLogger().severe("JDBC Driver class not found: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("JDBC Driver not found!")
+                    .build();
+        }
+
+        List<String> types = new ArrayList<>();
+
+        // Query TOP 10 results
+        try(Connection conn = DriverManager.getConnection(connectionString);
+            Statement stmt = conn.createStatement();
+            ResultSet rs = stmt.executeQuery(query)) {
+
+            while (rs.next()) {
+                types.add(rs.getString("Type"));
+            }
+        } catch (SQLException e) {
+            context.getLogger().severe("DB Error: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Database error: " + e.getMessage())
+                    .build();
+        }
+
+        // Return TOP 10 stored in results
+        return request.createResponseBuilder(HttpStatus.OK)
+                .header("Content-Type", "application/json")
+                .body(new Gson().toJson(types))
+                .build();
+    }
+
+    /**
+     * Takes in a post request and uses the provided Image Type to get all images of that type from the Signage Image Container.
+     * @param request A String representing the requested Image Type
+     * @param context General context
+     * @return A list of the names of the Images with the specified Image Type.
+     */
+    @FunctionName("GetAllImagesOfType")
+    public HttpResponseMessage getAllImagesOfType(
+            @HttpTrigger(name = "req", methods = {HttpMethod.POST}, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context
+            ) {
+        context.getLogger().info("Processing Image Type from request...");
+
+        // Handle metadata
+        String json = request.getBody().orElse("");
+        if (json.isEmpty()) {
+            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                    .body("Request body is empty.")
+                    .build();
+        }
+
+        String type = "";
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode data = mapper.readTree(json);
+
+            if (!data.has("type") || data.get("type").asText().isEmpty()) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Missing or invalid 'type' field in request.")
+                        .build();
+            }
+
+            type = data.get("type").asText();
+        } catch (Exception e) {
+            context.getLogger().severe("Error processing request: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error processing request: " + e.getMessage())
+                    .build();
+        }
+
+        context.getLogger().info("Got Image Type. Querying database...");
+
+        String connectionString = System.getenv("SqlConnectionString");
+        String query = "SELECT DISTINCT Image FROM dbo.[Signage] WHERE CAST([Type] AS nvarchar(max)) = ?";
+
+        List<String> results = new ArrayList<>();
+
+        try(Connection conn = DriverManager.getConnection(connectionString);
+            PreparedStatement stmt = conn.prepareStatement(query)) {
+
+            stmt.setString(1, type);
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    results.add(rs.getString("Image"));
+                }
+            }
+        } catch (SQLException e) {
+            context.getLogger().severe("DB Error: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Database error: " + e.getMessage())
+                    .build();
+        }
+
+        // Return TOP 10 stored in results
+        return request.createResponseBuilder(HttpStatus.OK)
+                .header("Content-Type", "application/json")
+                .body(new Gson().toJson(results))
                 .build();
     }
 
