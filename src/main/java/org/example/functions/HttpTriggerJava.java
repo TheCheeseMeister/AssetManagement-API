@@ -24,11 +24,82 @@ import org.example.functions.JwtGenerator;
  * Azure Functions with HTTP Trigger.
  */
 public class HttpTriggerJava {
+
+    /** Blob Container Name*/
+    public static final String CONTAINER = "video-signage"; // your container
+
     /**
      * This function listens at endpoint "/api/HttpTriggerJava". Two ways to invoke it using "curl" command in bash:
      * 1. curl -d "HTTP Body" {your host}/api/HttpTriggerJava
      * 2. curl {your host}/api/HttpTriggerJava?name=HTTP%20QuerY
      */
+
+
+    /**
+    * We Will Create Get SaS URL Function So that We won't have to expose our SAS Url in FLutter App
+    * We This API Will be called then UploadVideo Of Siganges will be carried out
+    * */
+
+    @FunctionName("GetUploadUrl")
+    public HttpResponseMessage getUploadUrl(
+            @HttpTrigger(name = "req", methods = { HttpMethod.POST }, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext ctx) {
+
+        try {
+            ObjectMapper om = new ObjectMapper();
+            String body = request.getBody().orElse("{}");
+            JsonNode json = om.readTree(body);
+
+            //metadata from client
+            String deviceId = json.hasNonNull("deviceId") ? json.get("deviceId").asText() : null;
+
+            // Create a new id
+            String videoID = UUID.randomUUID().toString();
+            String blobPath = "videos/" + videoID + ".mp4";
+
+            // Storage client
+            String connStr = getenvOrThrow("BlobStorageConnection");
+            BlobServiceClient svc = new BlobServiceClientBuilder().connectionString(connStr).buildClient();
+            var container = svc.getBlobContainerClient(CONTAINER);
+            if (!container.exists()) container.create();
+
+            var blob = container.getBlobClient(blobPath);
+
+            // SAS: write-only, 15 minutes
+            OffsetDateTime nowUtc = OffsetDateTime.now(ZoneOffset.UTC);
+            OffsetDateTime expires = nowUtc.plusMinutes(15);
+
+            BlobSasPermission perms = new BlobSasPermission()
+                    .setWritePermission(true)
+                    .setCreatePermission(true)
+                    .setAddPermission(true);
+
+            BlobServiceSasSignatureValues sv = new BlobServiceSasSignatureValues(expires, perms)
+                    .setStartTime(nowUtc.minusMinutes(1))
+                    .setProtocol(SasProtocol.HTTPS_ONLY);
+
+            String sas = blob.generateSas(sv);
+            String uploadUrl = blob.getBlobUrl() + "?" + sas;
+
+            ObjectNode resp = om.createObjectNode();
+            resp.put("videoID", videoID);
+            resp.put("blobPath", blobPath);
+            if (deviceId != null) resp.put("deviceId", deviceId);
+            resp.put("uploadUrl", uploadUrl);
+            resp.put("expiresUtc", expires.toString());
+
+            return request.createResponseBuilder(HttpStatus.OK)
+                    .header("Content-Type", "application/json")
+                    .body(om.writeValueAsString(resp)).build();
+
+        } catch (Exception e) {
+            ctx.getLogger().severe("GetUploadUrl error: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("GetUploadUrl error: " + e.getMessage()).build();
+        }
+    }
+
     @FunctionName("GetMaintenanceCrew")
     public HttpResponseMessage getMaintenanceCrew(
             @HttpTrigger(name = "req", methods = {HttpMethod.GET}, authLevel = AuthorizationLevel.FUNCTION)
@@ -718,5 +789,136 @@ public class HttpTriggerJava {
                     .body("Error processing request: " + e.getMessage())
                     .build();
         }
+    }
+
+    @FunctionName("UploadVideo")
+    public HttpResponseMessage uploadVideo(
+            @HttpTrigger(
+                    name = "req",
+                    methods = { HttpMethod.POST },
+                    authLevel = AuthorizationLevel.FUNCTION
+            ) HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext ctx) {
+
+        try {
+            ObjectMapper om = new ObjectMapper();
+            String body = request.getBody().orElse("");
+            if (body.isEmpty()) return bad(request, "Empty body");
+
+            JsonNode json = om.readTree(body);
+
+            String videoID      = text(json, "videoID");
+            String blobPath     = text(json, "blobPath");
+            String startUtcIso  = text(json, "startUtc");
+            Integer durationSec = json.hasNonNull("durationSec") ? json.get("durationSec").asInt() : null;
+            String deviceId     = text(json, "deviceId");
+
+            if (videoID == null || blobPath == null || startUtcIso == null || durationSec == null) {
+                return bad(request, "Missing: videoID, blobPath, startUtc, durationSec");
+            }
+
+            //  Verify blob
+            String connStr = getenvOrThrow("BlobStorageConnection");
+            BlobServiceClient svc = new BlobServiceClientBuilder().connectionString(connStr).buildClient();
+            var container = svc.getBlobContainerClient(CONTAINER);
+            var blob = container.getBlobClient(blobPath);
+
+            if (!blob.exists()) return bad(request, "Blob not found: " + blobPath);
+            long size = blob.getProperties().getBlobSize();
+            if (size <= 0) return bad(request, "Blob has zero size: " + blobPath);
+
+            // Insert into SQL (transaction)
+            String sqlConn = getenvOrThrow("SqlConnectionString");
+            try (Connection cn = DriverManager.getConnection(sqlConn)) {
+                cn.setAutoCommit(false);
+
+                // dbo.Videos
+                try (PreparedStatement ps = cn.prepareStatement("""
+                    INSERT INTO dbo.Videos (videoID, startUtc, durationSec, blobPath, deviceId)
+                    VALUES (?, ?, ?, ?, ?)
+                """)) {
+                    ps.setString(1, videoID);
+                    ps.setObject(2, OffsetDateTime.parse(startUtcIso)); // DATETIME2 via OffsetDateTime
+                    ps.setInt(3, durationSec);
+                    ps.setString(4, blobPath);
+                    if (deviceId != null && !deviceId.isEmpty())
+                        ps.setString(5, deviceId);
+                    else
+                        ps.setNull(5, Types.NVARCHAR);
+                    ps.executeUpdate();
+                }
+
+                // dbo.VideoGPS (batch insertion operation)
+                if (json.has("gps") && json.get("gps").isArray()) {
+                    batchInsertGps(cn, videoID, startUtcIso, json.get("gps"));
+                }
+
+                cn.commit();
+            }
+
+            return request.createResponseBuilder(HttpStatus.OK)
+                    .header("Content-Type", "application/json")
+                    .body("{\"status\":\"ok\",\"message\":\"Finalized\"}")
+                    .build();
+
+        } catch (Exception e) {
+            ctx.getLogger().severe("UploadVideo error: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("UploadVideo error: " + e.getMessage())
+                    .build();
+        }
+    }
+
+    // ---------- helpers ----------
+    private static HttpResponseMessage bad(HttpRequestMessage<?> req, String msg) {
+        return req.createResponseBuilder(HttpStatus.BAD_REQUEST).body(msg).build();
+    }
+
+    private static String getenvOrThrow(String key) {
+        String v = System.getenv(key);
+        if (v == null || v.isEmpty()) throw new RuntimeException("Missing app setting: " + key);
+        return v;
+    }
+
+    private static String text(JsonNode j, String f) {
+        return j.hasNonNull(f) ? j.get(f).asText() : null;
+    }
+
+    private static void batchInsertGps(Connection cn, String videoID, String startIso, JsonNode gpsArray) throws Exception {
+        OffsetDateTime start = OffsetDateTime.parse(startIso);
+
+        try (PreparedStatement ps = cn.prepareStatement("""
+            INSERT INTO dbo.VideoGPS (videoID, Timestamp, Latitude, Longitude, tRelSec)
+            VALUES (?, ?, ?, ?, ?)
+        """)) {
+            for (JsonNode n : gpsArray) {
+                if (!n.hasNonNull("lat") || !n.hasNonNull("lon")) continue;
+
+                double lat = n.get("lat").asDouble();
+                double lon = n.get("lon").asDouble();
+
+                OffsetDateTime ts;
+                Integer tRel = null;
+
+                if (n.hasNonNull("timestamp")) {
+                    ts = OffsetDateTime.parse(n.get("timestamp").asText());
+                } else if (n.hasNonNull("tRelSec")) {
+                    tRel = n.get("tRelSec").asInt();
+                    ts = start.plusSeconds(tRel);
+                } else {
+                    continue; // skip point without time info
+                }
+
+                ps.setString(1, videoID);
+                ps.setObject(2, ts);
+                ps.setDouble(3, lat);
+                ps.setDouble(4, lon);
+                if (tRel != null) ps.setInt(5, tRel); else ps.setNull(5, Types.INTEGER);
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
     }
 }
