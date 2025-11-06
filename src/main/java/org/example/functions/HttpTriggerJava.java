@@ -1,6 +1,7 @@
 package org.example.functions;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -8,6 +9,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.sql.*;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -229,9 +233,11 @@ public class HttpTriggerJava {
 
     /**
      * Takes in a post request and uses the provided Image Type to get all images of that type from the Signage Image Container.
+     * If no type is provided, gets all images instead
+     *
      * @param request A String representing the requested Image Type
      * @param context General context
-     * @return A list of the names of the Images with the specified Image Type.
+     * @return All images of the specified type inside a zip file.
      */
     @FunctionName("GetAllImagesOfType")
     public HttpResponseMessage getAllImagesOfType(
@@ -254,7 +260,7 @@ public class HttpTriggerJava {
             ObjectMapper mapper = new ObjectMapper();
             JsonNode data = mapper.readTree(json);
 
-            if (!data.has("type") || data.get("type").asText().isEmpty()) {
+            if (!data.has("type")) {
                 return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
                         .body("Missing or invalid 'type' field in request.")
                         .build();
@@ -271,14 +277,22 @@ public class HttpTriggerJava {
         context.getLogger().info("Got Image Type. Querying database...");
 
         String connectionString = System.getenv("SqlConnectionString");
-        String query = "SELECT DISTINCT Image FROM dbo.[Signage] WHERE CAST([Type] AS nvarchar(max)) = ?";
+        String query = "";
+
+        if (Objects.equals(type, "")) {
+            query = "SELECT DISTINCT Image FROM dbo.[Signage]";
+        } else {
+            query = "SELECT DISTINCT Image FROM dbo.[Signage] WHERE CAST([Type] AS nvarchar(max)) = ?";
+        }
 
         List<String> results = new ArrayList<>();
 
         try(Connection conn = DriverManager.getConnection(connectionString);
             PreparedStatement stmt = conn.prepareStatement(query)) {
 
-            stmt.setString(1, type);
+            if (!Objects.equals(type, "")) {
+                stmt.setString(1, type);
+            }
 
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
@@ -292,11 +306,59 @@ public class HttpTriggerJava {
                     .build();
         }
 
-        // Return TOP 10 stored in results
+        String sasURL = "https://pavementimg.blob.core.windows.net/images?sp=rl&st=2025-11-03T17:06:22Z&se=2026-06-04T00:21:22Z&spr=https&sv=2024-11-04&sr=c&sig=xe0KG6qa3K0RiGlY%2BqGjpk26HL963vbzteXms7cvpaY%3D";
+
+        String[] parts = sasURL.split("\\?", 2);
+        String baseURL = parts[0];
+        String sasToken = parts[1];
+
+        List<String> blobURLs = results.stream()
+                .map(name -> String.format("%s/%s?%s", baseURL, name, sasToken))
+                .collect(Collectors.toList());
+
         return request.createResponseBuilder(HttpStatus.OK)
                 .header("Content-Type", "application/json")
-                .body(new Gson().toJson(results))
+                .body(blobURLs)
                 .build();
+
+        /*String connectStr = System.getenv("ConnectBlobStorage");
+        String containerName = "images";
+        BlobServiceClient blobServiceClient = new BlobServiceClientBuilder()
+                .connectionString(connectStr)
+                .buildClient();
+
+        BlobContainerClient containerClient = blobServiceClient.getBlobContainerClient(containerName);
+        if (!containerClient.exists()) {
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Container 'images' doesn't exist.")
+                    .build();
+        }
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ZipOutputStream zos = new ZipOutputStream(baos);
+
+        try {
+            for (String blob : results) {
+                BlobClient blobClient = containerClient.getBlobClient(blob);
+                ZipEntry entry = new ZipEntry(blob);
+                zos.putNextEntry(entry);
+                blobClient.downloadStream(zos);
+                zos.closeEntry();
+            }
+            zos.close();
+        } catch(Exception e) {
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Failure to build zip file.")
+                    .build();
+        }
+
+        byte[] zipBytes = baos.toByteArray();
+
+        return request.createResponseBuilder(HttpStatus.OK)
+                .header("Content-Type", "application/zip")
+                .header("Content-Disposition", "attachment; filename=\"images.zip\"")
+                .body(zipBytes)
+                .build();*/
     }
 
     /**
