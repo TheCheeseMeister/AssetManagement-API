@@ -442,6 +442,170 @@ public class HttpTriggerJava {
         }
     }
 
+    @FunctionName("UploadCurbs")
+    public HttpResponseMessage uploadCurbs(
+            @HttpTrigger(name = "req", methods = {HttpMethod.POST}, authLevel = AuthorizationLevel.FUNCTION)
+            HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context
+    ) {
+        context.getLogger().info("Processing Upload to Curbs table...");
+
+        String json = request.getBody().orElse("");
+        if (json.isEmpty()) {
+            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                    .body("Request body is empty.")
+                    .build();
+        }
+
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode data = mapper.readTree(json);
+
+            // ====== METADATA =========
+            Double milepostEnd = data.hasNonNull("milepost_end") ? data.get("milepost_end").asDouble() : null;
+            Double lat = data.hasNonNull("latitude") ? data.get("latitude").asDouble() : null;
+            Double lon = data.hasNonNull("longitude") ? data.get("longitude").asDouble() : null;
+
+            String side = data.hasNonNull("side") ? data.get("side").asText() : null;
+            String roadType = data.hasNonNull("road_type") ? data.get("road_type").asText() : null;
+            String functionalClass = data.hasNonNull("functional_class") ? data.get("functional_class").asText() : null;
+
+            String curbType = data.hasNonNull("curb_type") ? data.get("curb_type").asText() : null;
+            String material = data.hasNonNull("material") ? data.get("material").asText() : null;
+            String shape = data.hasNonNull("shape") ? data.get("shape").asText() : null;
+
+            String condition = data.hasNonNull("condition") ? data.get("condition").asText() : null;
+            String defectType = data.hasNonNull("defect_type") ? data.get("defect_type").asText() : null;
+            String severity = data.hasNonNull("severity") ? data.get("severity").asText() : null;
+            Boolean hazardous = data.hasNonNull("hazardous") ? data.get("hazardous").asBoolean() : null;
+
+            String adjacentFeature = data.hasNonNull("adjacent_feature") ? data.get("adjacent_feature").asText() : null;
+            Boolean drainagePresent = data.hasNonNull("drainage_present") ? data.get("drainage_present").asBoolean() : null;
+            Boolean vegetationIssues = data.hasNonNull("vegetation_issues") ? data.get("vegetation_issues").asBoolean() : null;
+            Boolean walkwayPresent = data.hasNonNull("walkway_present") ? data.get("walkway_present").asBoolean() : null;
+
+            // Inventory date & time
+            String dateStr = data.hasNonNull("inspection_date") ? data.get("inspection_date").asText() : "";
+            LocalDate inspectionDate = null;
+            LocalTime inspectionTime = null;
+
+            if (!dateStr.isEmpty()) {
+                LocalDateTime parsed = LocalDateTime.parse(dateStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+                inspectionDate = parsed.toLocalDate();
+                inspectionTime = parsed.toLocalTime();
+            }
+
+            String inspectedBy = data.hasNonNull("inspected_by") ? data.get("inspected_by").asText() : null;
+            String weatherCondition = data.hasNonNull("weather_condition") ? data.get("weather_condition").asText() : null;
+
+            // Image data
+            String imageType = data.hasNonNull("image_type") ? data.get("image_type").asText() : null;
+            String base64Image = data.hasNonNull("image") ? data.get("image").asText() : null;
+
+            // Ticket fields
+            Integer ticketNum = data.hasNonNull("ticket_num") ? data.get("ticket_num").asInt() : null;
+            String ticketStatus = data.hasNonNull("ticket_status") ? data.get("ticket_status").asText() : null;
+
+
+            if (lat == null || lon == null || inspectionDate == null || inspectionTime == null || base64Image == null) {
+                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                        .body("Missing required fields (lat, long, image, inspection_date).")
+                        .build();
+            }
+
+            // ===  UPLOAD IMAGE TO BLOB ======
+            context.getLogger().info("Uploading curb image to blob...");
+
+            byte[] imageBytes = Base64.getDecoder().decode(base64Image);
+
+            String connectStr = System.getenv("ConnectBlobStorage");
+            BlobServiceClient blobServiceClient = new BlobServiceClientBuilder()
+                    .connectionString(connectStr)
+                    .buildClient();
+
+            BlobContainerClient containerClient = blobServiceClient.getBlobContainerClient("images");
+            if (!containerClient.exists()) {
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Container 'images' does not exist.")
+                        .build();
+            }
+
+            String blobName = String.format("curb_%f_%f.png", lat, lon);
+            BlobClient blobClient = containerClient.getBlobClient(blobName);
+
+            ByteArrayInputStream stream = new ByteArrayInputStream(imageBytes);
+            blobClient.upload(stream, imageBytes.length, true);
+
+            String connStr = System.getenv("SqlConnectionString");
+            Connection conn = DriverManager.getConnection(connStr);
+
+            String sql = "INSERT INTO dbo.Curbs (Milepost_End, Latitude, Longitude, Side, Road_Type, Functional_Class, " +
+                    "Curb_Type, Material, Shape, Condition, Defect_Type, Severity, Hazardous, Adjacent_Feature, " +
+                    "Drainage_Present, Vegetation_Issues, Walkway_Present, Inspection_Date, Inspection_Time, " +
+                    "Inspected_By, Weather_Condition, Image_URL, Image_Type, Video_ID, Ticket_Num, Ticket_Status, Created_On) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE())";
+
+            PreparedStatement stmt = conn.prepareStatement(sql);
+
+            if (milepostEnd != null) stmt.setDouble(1, milepostEnd); else stmt.setNull(1, Types.DOUBLE);
+            stmt.setDouble(2, lat);
+            stmt.setDouble(3, lon);
+            stmt.setString(4, side);
+            stmt.setString(5, roadType);
+            stmt.setString(6, functionalClass);
+            stmt.setString(7, curbType);
+            stmt.setString(8, material);
+            stmt.setString(9, shape);
+            stmt.setString(10, condition);
+            stmt.setString(11, defectType);
+            stmt.setString(12, severity);
+
+            if (hazardous != null) stmt.setBoolean(13, hazardous); else stmt.setNull(13, Types.BIT);
+
+            stmt.setString(14, adjacentFeature);
+
+            if (drainagePresent != null) stmt.setBoolean(15, drainagePresent); else stmt.setNull(15, Types.BIT);
+            if (vegetationIssues != null) stmt.setBoolean(16, vegetationIssues); else stmt.setNull(16, Types.BIT);
+            if (walkwayPresent != null) stmt.setBoolean(17, walkwayPresent); else stmt.setNull(17, Types.BIT);
+
+            stmt.setDate(18, java.sql.Date.valueOf(inspectionDate));
+            stmt.setTime(19, java.sql.Time.valueOf(inspectionTime));
+            stmt.setString(20, inspectedBy);
+            stmt.setString(21, weatherCondition);
+            stmt.setString(22, blobName);
+            stmt.setString(23, imageType);
+
+            // Video_ID (optional)
+            if (data.hasNonNull("video_id"))
+                stmt.setString(24, data.get("video_id").asText());
+            else
+                stmt.setNull(24, Types.NVARCHAR);
+
+            // Ticket fields
+            if (ticketNum != null) stmt.setInt(25, ticketNum); else stmt.setNull(25, Types.INTEGER);
+            stmt.setString(26, ticketStatus);
+
+            int rows = stmt.executeUpdate();
+
+            if (rows > 0) {
+                return request.createResponseBuilder(HttpStatus.OK)
+                        .body("Curb data uploaded successfully.")
+                        .build();
+            } else {
+                return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("Failed to insert curb data.")
+                        .build();
+            }
+
+        } catch (Exception e) {
+            context.getLogger().severe("Error: " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error: " + e.getMessage())
+                    .build();
+        }
+    }
+
+
     @FunctionName("GetDataForImageSignage")
     public HttpResponseMessage getDataForImageSignage(
             @HttpTrigger(name = "req", methods = {HttpMethod.POST}, authLevel = AuthorizationLevel.FUNCTION)
